@@ -1,4 +1,28 @@
-# Asynchronous Transaction Intelligence & Risk Assessment Framework
+<p align="center">
+  <img src="Assets/PostgreSQLlogo.png" width="110">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="Assets/redis_original_wordmark_logo_icon_146369.png" width="70">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="Assets/file_type_docker_icon_130643.png" width="90">
+</p>
+
+<h1 align="center">
+Asynchronous Transaction Intelligence & Risk Assessment Framework
+</h1>
+
+<p align="center">
+  <strong>Real-Time Risk Assessment • Event-Driven Intelligence • Distributed Processing</strong>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/github/license/Sudharsanselvaraj/Asynchronous-Transaction-Intelligence-Risk-Assessment-Framework">
+  <img src="https://img.shields.io/github/stars/Sudharsanselvaraj/Asynchronous-Transaction-Intelligence-Risk-Assessment-Framework">
+  <img src="https://img.shields.io/badge/Python-3.11+-blue">
+  <img src="https://img.shields.io/badge/FastAPI-0.115+-green">
+  <img src="https://img.shields.io/badge/PostgreSQL-16-blue">
+  <img src="https://img.shields.io/badge/Redis-7-red">
+  <img src="https://img.shields.io/badge/Docker-Ready-2496ED">
+</p>
 
 > AI-powered CSV transaction analysis pipeline — async job queue architecture with statistical anomaly detection, LLM-driven categorisation, and structured risk reporting.
 
