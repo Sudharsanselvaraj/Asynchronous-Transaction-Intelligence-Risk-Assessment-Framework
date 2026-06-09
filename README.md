@@ -24,9 +24,6 @@ Asynchronous Transaction Intelligence & Risk Assessment Framework
 </p>
 
 > AI-powered CSV transaction analysis pipeline — async job queue architecture with statistical anomaly detection, LLM-driven categorisation, and structured risk reporting.
-
-**Stack:** FastAPI · Celery · PostgreSQL · Redis · Google Gemini · Docker Compose · Alembic · Pydantic v2
-
 ---
 
 ## Overview
