@@ -16,8 +16,10 @@ from app.core.config import get_settings
 def create_celery_app() -> Celery:
     settings = get_settings()
 
-    broker_url = str(settings.redis_url).rstrip("/") + f"/{settings.celery_broker_db}"
-    backend_url = str(settings.redis_url).rstrip("/") + f"/{settings.celery_result_db}"
+    # Extract Redis host:port:password without DB number
+    redis_base = str(settings.redis_url).rsplit('/', 1)[0]
+    broker_url = f"{redis_base}/{settings.celery_broker_db}"
+    backend_url = f"{redis_base}/{settings.celery_result_db}"
 
     app = Celery("txn_pipeline")
 
@@ -54,6 +56,7 @@ def create_celery_app() -> Celery:
                 "schedule": 3600,  # every hour
             }
         },
+        beat_schedule_filename="/tmp/celerybeat-schedule",
     )
 
     return app
