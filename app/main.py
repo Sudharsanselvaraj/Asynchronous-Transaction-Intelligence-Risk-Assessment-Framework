@@ -14,6 +14,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, status
+from app.dashboard.health import router as health_router
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
@@ -83,6 +84,7 @@ def create_app() -> FastAPI:
 
     # ── Routes ────────────────────────────────────────────────────────────
     app.include_router(jobs.router)
+    app.include_router(health_router)
 
     # ── Health probes ─────────────────────────────────────────────────────
     @app.get("/health", tags=["ops"], summary="Liveness probe")
