@@ -1,0 +1,173 @@
+version: "3.9"
+
+# ── Secrets never hardcoded. All from .env file (git-ignored). ────────────────
+# Copy .env.example to .env and fill in values before running.
+
+x-common-env: &common-env
+  env_file: .env
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    env_file: .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-txndb}
+      POSTGRES_USER: ${POSTGRES_USER:-txnuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-txnuser} -d ${POSTGRES_DB:-txndb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    restart: unless-stopped
+    networks:
+      - internal
+
+  # ── Redis ───────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 300M
+    restart: unless-stopped
+    networks:
+      - internal
+
+  # ── API ─────────────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    <<: *common-env
+    ports:
+      - "8000:8000"
+    volumes:
+      - upload_data:/tmp/txn_uploads
+    depends_on:
+      db:
+        condition: service_healthy   # waits for Postgres to accept connections
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    restart: unless-stopped
+    networks:
+      - internal
+      - external
+
+  # ── Celery Worker (LLM queue) ────────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    <<: *common-env
+    command: >
+      celery -A app.workers.celery_app.celery_app worker
+      --loglevel=info
+      --queues=llm,default
+      --concurrency=4
+      --max-tasks-per-child=100
+    volumes:
+      - upload_data:/tmp/txn_uploads
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "celery", "-A", "app.workers.celery_app.celery_app", "inspect", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+    restart: unless-stopped
+    networks:
+      - internal
+
+  # ── Celery Beat (scheduled tasks) ────────────────────────────────────────────
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    <<: *common-env
+    command: >
+      celery -A app.workers.celery_app.celery_app beat
+      --loglevel=info
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+    restart: unless-stopped
+    networks:
+      - internal
+
+  # ── Alembic migrations (init container pattern) ──────────────────────────────
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    <<: *common-env
+    command: alembic upgrade head
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"   # run once and exit
+    networks:
+      - internal
+
+volumes:
+  postgres_data:
+  upload_data:
+
+networks:
+  internal:
+    driver: bridge
+    internal: true   # DB and Redis not reachable from host
+  external:
+    driver: bridge   # Only API is on external network

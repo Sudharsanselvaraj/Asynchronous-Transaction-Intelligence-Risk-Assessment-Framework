@@ -1,0 +1,51 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info
+dist
+build
+.eggs
+
+# Virtual environments
+.venv
+venv
+env
+
+# Testing
+.pytest_cache
+.coverage
+htmlcov
+.mypy_cache
+.ruff_cache
+
+# Secrets — NEVER in image
+.env
+*.env
+
+# Development files
+*.log
+*.sqlite
+*.db
+
+# Node (if any tooling)
+node_modules
+
+# IDE
+.vscode
+.idea
+*.swp
+
+# Documentation
+docs
+*.md
+!README.md
+
+# Test fixtures (include separately if needed)
+tests/fixtures/large_*.csv
