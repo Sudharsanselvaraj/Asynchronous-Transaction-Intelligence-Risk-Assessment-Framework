@@ -1,566 +1,431 @@
-# Transaction Processing Pipeline
+<p align="center">
+  <img src="Assets/PostgreSQLlogo.png" width="110">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="Assets/redis_original_wordmark_logo_icon_146369.png" width="70">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="Assets/file_type_docker_icon_130643.png" width="90">
+</p>
 
-[![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688.svg?logo=fastapi)](https://fastapi.tiangolo.com/)
-[![Celery](https://img.shields.io/badge/Celery-5.4-37814A.svg)](https://docs.celeryq.dev/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791.svg?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![Redis](https://img.shields.io/badge/Redis-7-DC382D.svg?logo=redis&logoColor=white)](https://redis.io/)
-[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
-[![Tests](https://img.shields.io/badge/tests-51%20passing-brightgreen.svg)](#development)
-[![Coverage](https://img.shields.io/badge/coverage-90%25-brightgreen.svg)](#development)
+<h1 align="center">
+Asynchronous Transaction Intelligence & Risk Assessment Framework
+</h1>
 
-Async AI-powered financial transaction analysis API. Upload a dirty CSV, get back cleaned data, flagged anomalies, LLM-classified categories, and a narrative risk summary — all processed in the background while the API returns immediately.
+<p align="center">
+  <strong>Real-Time Risk Assessment • Event-Driven Intelligence • Distributed Processing</strong>
+</p>
 
----
+<p align="center">
+  <img src="https://img.shields.io/github/license/Sudharsanselvaraj/Asynchronous-Transaction-Intelligence-Risk-Assessment-Framework">
+  <img src="https://img.shields.io/badge/Python-3.11+-blue">
+  <img src="https://img.shields.io/badge/FastAPI-0.115+-green">
+  <img src="https://img.shields.io/badge/PostgreSQL-16-blue">
+  <img src="https://img.shields.io/badge/Redis-7-red">
+  <img src="https://img.shields.io/badge/Docker-Ready-2496ED">
+</p>
 
-## Table of Contents
-
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Quick Start](#quick-start)
-- [API Reference](#api-reference)
-- [Processing Pipeline](#processing-pipeline)
-- [Environment Variables](#environment-variables)
-- [Design Decisions](#design-decisions)
-- [Scalability Analysis](#scalability-analysis)
-- [Development](#development)
-
+> AI-powered CSV transaction analysis pipeline — async job queue architecture with statistical anomaly detection, LLM-driven categorisation, and structured risk reporting.
 ---
 
 ## Overview
 
-The service accepts a raw transaction CSV (dirty data: mixed date formats, inconsistent casing, missing fields, duplicates), processes it through a four-stage async pipeline, and exposes results via a polling REST API.
+This system ingests CSV transaction files via a non-blocking REST API, processes them through a multi-stage worker pipeline, and produces structured risk assessments with narrative summaries. No synchronous blocking occurs in the API layer — all heavy computation is delegated to Celery workers.
 
-**Key properties:**
+**Processing pipeline (per job):**
 
-- **Non-blocking uploads** — file is streamed to disk; job ID returned in under 100ms; all processing happens in a Celery worker
-- **Idempotent uploads** — SHA-256 content hash deduplication; re-uploading the same file returns the existing job instantly
-- **Graceful LLM failure** — if Gemini is unavailable after 3 retries, affected rows are marked `llm_failed=true`; the job still completes with all other data
-- **Zero manual setup** — Alembic migrations run automatically in an init container; `docker compose up --build` is the only command needed
-- **Structured logging** — every log line is a JSON object with timestamp, logger, and structured context fields; compatible with Datadog, CloudWatch, and Loki
-
-**What the pipeline does with `transactions.csv` (included):**
-
-| Stage | Input | Output |
-|---|---|---|
-| Cleaning | 95 raw rows | 85 rows (10 exact duplicates removed) |
-| Anomaly detection | 85 rows | 22 flagged (statistical outliers + USD at domestic merchants + high-value failed) |
-| LLM classification | 13 uncategorised rows | Categories assigned via Gemini |
-| Narrative summary | Aggregated stats | Risk level + 2-3 sentence narrative |
+```
+Upload → SHA-256 dedup → Job record (pending) → Celery enqueue
+         ↓
+    [Worker: llm queue]
+    ├── 1. clean_csv()               Normalise dates, strip currency symbols, dedup rows
+    ├── 2. detect_anomalies()        Statistical outlier (3× median) + currency mismatch
+    ├── 3. classify_uncategorised()  Batched Gemini calls, Pydantic-validated responses
+    ├── 4. generate_narrative()      Single LLM call → risk level + spend narrative
+    └── 5. bulk_insert()             Single DB commit for all transactions + summary
+```
 
 ---
 
 ## Architecture
 
 ```
-Client (curl / Postman / frontend)
-        |
-        | HTTP
-        v
-+-----------------------------------------------+
-|  FastAPI  (port 8000)                         |
-|                                               |
-|  POST /jobs/upload                            |
-|    1. Validate MIME type, extension, size     |
-|    2. Stream file to disk (64KB chunks)       |
-|    3. SHA-256 hash for deduplication          |
-|    4. INSERT Job(status=pending)              |
-|    5. ENQUEUE task → Redis                    |
-|    6. Return job_id in <100ms                 |
-|                                               |
-|  GET /jobs/{id}/status   → SELECT Job+Summary |
-|  GET /jobs/{id}/results  → SELECT Job+Txns   |
-|  GET /jobs               → SELECT Jobs        |
-+-------+------+------+------------------------+
-        |      |      |
-        | DB   | DB   | Enqueue
-        v      v      v
-  +----------+    +----------+
-  |PostgreSQL|    |  Redis   |
-  |  jobs    |    | db0:     |
-  | transactions|  |  broker  |
-  |job_summaries| | db1:    |
-  +----------+    |  results |
-                  +----+-----+
-                       |
-                       | Dequeue
-                       v
-        +-------------------------------+
-        |  Celery Worker                |
-        |                               |
-        |  1. clean_csv()               |
-        |     Normalise dates, strip $  |
-        |     Uppercase status/currency |
-        |     Remove duplicates         |
-        |                               |
-        |  2. detect_anomalies()        |
-        |     Statistical outlier       |
-        |     Currency mismatch         |
-        |     High-value failed         |
-        |                               |
-        |  3. classify_uncategorised()  |
-        |     Batched Gemini calls      |
-        |     (max 20 rows per call)    |
-        |                               |
-        |  4. generate_narrative()      |
-        |     Single Gemini call        |
-        |                               |
-        |  5. bulk_insert()             |
-        |     One DB commit for all     |
-        +---------------+---------------+
-                        |
-                        | HTTPS (retried 3x, exp backoff)
-                        v
-                +------------------+
-                | Gemini 1.5 Flash |
-                | External API     |
-                +------------------+
+┌──────────────────────────────────────────────────────────────┐
+│  Client                                                      │
+└──────────────────┬───────────────────────────────────────────┘
+                   │ POST /jobs/upload (multipart/form-data)
+                   ▼
+┌──────────────────────────────────────────────────────────────┐
+│  FastAPI  :8000                                              │
+│  ├── Stream file to /tmp/txn_uploads/{uuid}.csv              │
+│  ├── SHA-256 deduplication check                             │
+│  ├── Create Job(status=pending) → PostgreSQL                 │
+│  └── Enqueue process_csv_task → Redis broker                 │
+└──────────────────┬───────────────────────────────────────────┘
+                   │ 201 {job_id} returned immediately
+            (async)│
+                   ▼
+┌──────────────────────────────────────────────────────────────┐
+│  Celery Worker  [queue: llm]                                 │
+│  ├── clean_csv()          → normalise, dedup, ISO dates      │
+│  ├── detect_anomalies()   → statistical + currency mismatch  │
+│  ├── classify_*()         → batched Gemini (20 txn/call)     │
+│  ├── generate_narrative() → risk level + 2-3 sentence report │
+│  └── bulk_insert()        → single DB commit                 │
+└──────────────────┬───────────────────────────────────────────┘
+                   ▼
+┌──────────────────────────────────────────────────────────────┐
+│  PostgreSQL                                                  │
+│  ├── jobs          (UUID PK, status, file_hash)              │
+│  ├── transactions  (indexed by job_id, anomaly, category)    │
+│  └── job_summaries (JSONB for top_merchants, breakdown)      │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for Mermaid sequence, ER, and component diagrams.
+**Network isolation:** DB and Redis are on an `internal` bridge network with no host exposure. Only the API container is on the `external` network.
 
 ---
 
 ## Quick Start
 
-**Prerequisites:** Docker and Docker Compose.
+### Prerequisites
+
+- Docker ≥ 24.0 and Docker Compose v2
+- Google Gemini API key ([get one here](https://aistudio.google.com/))
+
+### 1. Clone and configure
 
 ```bash
-# 1. Clone the repository
-git clone <repo-url>
+git clone https://github.com/your-org/txn-pipeline
 cd txn-pipeline
-
-# 2. Configure environment
 cp .env.example .env
-# Edit .env:
-#   GEMINI_API_KEY=your_key   (free at https://aistudio.google.com/)
-#   POSTGRES_PASSWORD=...     (any strong string)
-#   REDIS_PASSWORD=...        (any strong string)
+```
 
-# 3. Start all services — migrations run automatically
+Edit `.env` — minimum required values:
+
+```env
+GEMINI_API_KEY=your-key-here
+POSTGRES_PASSWORD=changeme
+REDIS_PASSWORD=changeme
+DATABASE_URL=postgresql+asyncpg://txnuser:changeme@db:5432/txndb
+REDIS_URL=redis://:changeme@redis:6379/0
+```
+
+### 2. Start all services (migrations run automatically)
+
+```bash
 docker compose up --build
+```
 
-# 4. Verify the API is up
+The `migrate` service runs `alembic upgrade head` before the API accepts traffic. All service dependencies are health-checked before dependents start.
+
+### 3. Verify
+
+```bash
 curl http://localhost:8000/health
-# {"status":"ok"}
+# → {"status": "ok"}
 
 curl http://localhost:8000/ready
-# {"status":"ready","database":"up"}
+# → {"status": "ready"}
 ```
 
-> The `migrate` service runs `alembic upgrade head` and exits before the API starts accepting traffic. The API depends on `migrate` completing successfully.
-
-### Upload and process the included CSV
-
-```bash
-# Upload
-curl -X POST http://localhost:8000/jobs/upload \
-  -F "file=@transactions.csv"
-# {"job_id":"550e8400-...","status":"pending","message":"..."}
-
-# Poll status
-curl http://localhost:8000/jobs/550e8400-.../status
-
-# Get full results
-curl http://localhost:8000/jobs/550e8400-.../results
-```
+Swagger UI available at `http://localhost:8000/docs` (disabled in production).
 
 ---
 
 ## API Reference
 
-### POST /jobs/upload
+### Upload CSV
 
-Accept a CSV file. Stream it to disk, validate headers, deduplicate by SHA-256 hash, create a job record, and enqueue processing. Returns the job ID immediately.
-
-**Request**
 ```bash
+POST /jobs/upload
+Content-Type: multipart/form-data
+
 curl -X POST http://localhost:8000/jobs/upload \
   -F "file=@transactions.csv"
 ```
 
-**Response 201** — new job created
+**Response `201`:**
 ```json
 {
   "job_id": "550e8400-e29b-41d4-a716-446655440000",
   "status": "pending",
-  "message": "Job enqueued. Poll /jobs/{job_id}/status for updates."
+  "message": "Job queued for processing"
 }
 ```
 
-**Response 200** — duplicate file detected, returns existing job
-```json
-{
-  "job_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "completed",
-  "message": "Duplicate file — returning existing job"
-}
-```
-
-**Error codes**
-| HTTP | Code | Trigger |
-|------|------|---------|
-| 413 | `FILE_TOO_LARGE` | File exceeds 10MB |
-| 422 | `INVALID_MIME_TYPE` | Not a CSV MIME type |
-| 422 | `INVALID_EXTENSION` | Filename does not end in `.csv` |
+Constraints: max 10 MB, MIME types `text/csv` / `application/csv` / `text/plain`. Duplicate files (same SHA-256) are rejected.
 
 ---
 
-### GET /jobs/{job_id}/status
+### Poll job status
 
-Poll job progress. When status is `completed`, includes the full summary object.
-
-**Request**
 ```bash
-curl http://localhost:8000/jobs/550e8400-e29b-41d4-a716-446655440000/status
+GET /jobs/{job_id}/status
 ```
 
-**Response — processing**
+**Response (in-progress):**
 ```json
 {
-  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "job_id": "550e8400-...",
   "status": "processing",
   "filename": "transactions.csv",
-  "row_count_raw": null,
-  "row_count_clean": null,
-  "created_at": "2024-09-04T10:00:00Z",
+  "row_count_raw": 500,
+  "row_count_clean": 487,
+  "created_at": "2025-01-01T10:00:00Z",
   "completed_at": null,
   "error_message": null,
   "summary": null
 }
 ```
 
-**Response — completed**
+**Response (completed):**
 ```json
 {
-  "job_id": "550e8400-e29b-41d4-a716-446655440000",
   "status": "completed",
-  "filename": "transactions.csv",
-  "row_count_raw": 95,
-  "row_count_clean": 85,
-  "created_at": "2024-09-04T10:00:00Z",
-  "completed_at": "2024-09-04T10:00:45Z",
   "summary": {
-    "total_spend_inr": 642381.50,
-    "total_spend_usd": 58430.20,
-    "top_merchants": ["Flipkart", "IRCTC", "Ola"],
-    "anomaly_count": 22,
-    "narrative": "Spending is concentrated in e-commerce and travel...",
-    "risk_level": "high",
+    "total_spend_inr": 45230.50,
+    "total_spend_usd": 320.00,
+    "top_merchants": ["Amazon", "Swiggy", "Zomato"],
+    "anomaly_count": 3,
+    "narrative": "Spend concentrated in Food and Shopping. Three high-value outliers detected in account ACC_7A2F.",
+    "risk_level": "medium",
     "llm_failed": false
   }
 }
 ```
 
----
-
-### GET /jobs/{job_id}/results
-
-Full output for a completed job: cleaned transactions, anomalies, category breakdown, and narrative summary. Returns `409` if the job is not yet completed.
-
-**Request**
-```bash
-curl http://localhost:8000/jobs/550e8400-e29b-41d4-a716-446655440000/results
-```
-
-**Response 200**
-```json
-{
-  "job_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "completed",
-  "transactions": [
-    {
-      "id": "...",
-      "txn_id": "TXN1065",
-      "date": "2024-09-04",
-      "merchant": "Flipkart",
-      "amount": 10882.55,
-      "currency": "INR",
-      "status": "SUCCESS",
-      "category": "Shopping",
-      "account_id": "ACC003",
-      "is_anomaly": false,
-      "anomaly_reason": null,
-      "llm_category": null,
-      "llm_failed": false
-    }
-  ],
-  "anomalies": [
-    {
-      "txn_id": "TXN2003",
-      "merchant": "IRCTC",
-      "amount": 193647.29,
-      "currency": "INR",
-      "reason": "Amount 193647.29 exceeds 3.0x account median (9582.58) for ACC002"
-    }
-  ],
-  "category_breakdown": [
-    {"category": "Shopping", "total_spend": 215340.10, "transaction_count": 18},
-    {"category": "Travel", "total_spend": 180920.50, "transaction_count": 12}
-  ],
-  "summary": { ... }
-}
-```
-
-**Response 409** — job not yet completed
-```json
-{
-  "detail": {
-    "code": "JOB_NOT_COMPLETED",
-    "message": "Job is processing, results not yet available"
-  }
-}
-```
+Status values: `pending` → `processing` → `completed` | `failed`
 
 ---
 
-### GET /jobs
+### Get full results
 
-List all jobs with optional status filter and cursor pagination.
-
-**Request**
 ```bash
-# All jobs
-curl "http://localhost:8000/jobs"
+GET /jobs/{job_id}/results
+```
+
+Returns `transactions[]`, `anomalies[]`, `category_breakdown[]`, and `summary`.
+
+---
+
+### List jobs
+
+```bash
+# All jobs (paginated)
+GET /jobs?limit=20&offset=0
 
 # Filter by status
-curl "http://localhost:8000/jobs?status=completed&limit=10&offset=0"
-
-# Available status values: pending, processing, completed, failed
-```
-
-**Response 200**
-```json
-{
-  "items": [
-    {
-      "job_id": "550e8400-...",
-      "status": "completed",
-      "filename": "transactions.csv",
-      "row_count_raw": 95,
-      "created_at": "2024-09-04T10:00:00Z"
-    }
-  ],
-  "total": 1,
-  "limit": 20,
-  "offset": 0
-}
+GET /jobs?status=completed&limit=10
 ```
 
 ---
 
-### GET /health
+## CSV Format
 
-Kubernetes liveness probe. Returns `200` if the process is alive.
+Expected columns (case-insensitive, extra columns are ignored):
 
-```bash
-curl http://localhost:8000/health
-# {"status":"ok"}
-```
-
-### GET /ready
-
-Kubernetes readiness probe. Returns `200` only if the database is reachable. The load balancer stops sending traffic if this returns `503`.
-
-```bash
-curl http://localhost:8000/ready
-# 200 → {"status":"ready","database":"up"}
-# 503 → {"status":"not ready","database":"down","reason":"..."}
-```
-
-### GET /dashboard/health
-
-Detailed health dashboard for internal monitoring: database connection pool, Redis client count, and active Celery tasks.
-
-```bash
-curl http://localhost:8000/dashboard/health
-```
-```json
-{
-  "timestamp": "2024-09-04T10:00:00.123456",
-  "database": {"status": "ok", "pool_size": 10, "checked_out": 2},
-  "redis": {"status": "ok", "connected_clients": 4},
-  "celery": {"status": "ok", "active_tasks": 1}
-}
-```
-
----
-
-## Processing Pipeline
-
-### Stage 1: Data Cleaning (`app/services/cleaning.py`)
-
-Pure function — no I/O side effects; fully unit-testable.
-
-| Transformation | Logic |
-|---|---|
-| Date normalisation | Accepts `DD-MM-YYYY`, `YYYY/MM/DD`, `YYYY-MM-DD`; outputs ISO 8601 |
-| Amount cleaning | Strips `$`, commas, and spaces; rejects negatives and zeroes |
-| Status/Currency | Uppercased; invalid values stored as `null` |
-| Missing category | Filled with `"Uncategorised"` |
-| Missing `txn_id` | Generated as `GEN-{8-char hex}` |
-| Deduplication | Signature: `(txn_id, date, merchant, amount)`; first occurrence kept |
-
-### Stage 2: Anomaly Detection (`app/services/anomaly.py`)
-
-Four independent rules applied per row; multiple can fire simultaneously.
-
-| Rule | Trigger | Example |
+| Column | Type | Notes |
 |---|---|---|
-| Statistical outlier | `amount > 3× account median` (SUCCESS rows only) | TXN2003: ₹193,647 vs median ₹9,582 |
-| Currency mismatch | USD transaction at domestic-only Indian merchant | Zomato charged in USD |
-| High-value failed | `amount > ₹5,000 AND status = FAILED` | ₹9,092 FAILED Flipkart |
-| Source annotation | Notes field contains "suspicious" (case-insensitive) | Notes: "SUSPICIOUS" |
-
-### Stage 3: LLM Classification (`app/services/llm.py`)
-
-Only rows with `category = "Uncategorised"` are sent to Gemini.
-
-- Batched: max 20 rows per API call (configurable via `LLM_BATCH_SIZE`)
-- PII-safe: only `merchant`, `amount`, and `currency` are sent — no `account_id`
-- Response validated by Pydantic schema before persistence; invalid categories coerced to `"Other"`
-- On failure: rows marked `llm_failed=true`; job continues
-
-### Stage 4: Narrative Summary
-
-Single Gemini call with pre-computed aggregates (spend by currency, top merchants, anomaly count). Response includes a 2-3 sentence narrative and a `risk_level` of `low/medium/high`. Returns `null` gracefully if the LLM fails.
+| `txn_id` | string | Optional, unique transaction identifier |
+| `date` | string | Any common date format — normalised to ISO 8601 |
+| `merchant` | string | Used for anomaly detection and LLM classification |
+| `amount` | numeric | Currency symbols (`$`, `₹`, `,`) stripped automatically |
+| `currency` | string | `INR` or `USD` |
+| `status` | string | `SUCCESS`, `FAILED`, or `PENDING` |
+| `category` | string | Rows with `Uncategorised` are sent to Gemini |
+| `account_id` | string | Used for per-account statistical baseline |
+| `notes` | string | Optional; `suspicious` keyword triggers soft anomaly signal |
 
 ---
 
-## Environment Variables
+## Anomaly Detection
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `DATABASE_URL` | Yes | — | `postgresql+asyncpg://user:pass@host/db` |
-| `REDIS_URL` | Yes | — | `redis://:password@host:6379` |
-| `GEMINI_API_KEY` | Yes | — | Free key at [aistudio.google.com](https://aistudio.google.com/) |
-| `POSTGRES_PASSWORD` | Yes | — | Docker Compose PostgreSQL password |
-| `REDIS_PASSWORD` | Yes | — | Redis auth password |
-| `POSTGRES_USER` | No | `txnuser` | PostgreSQL username |
-| `POSTGRES_DB` | No | `txndb` | PostgreSQL database name |
-| `APP_ENV` | No | `development` | `development` / `testing` / `production` |
-| `LOG_LEVEL` | No | `INFO` | Python log level |
-| `UPLOAD_DIR` | No | `/tmp/txn_uploads` | Uploaded CSV storage path |
-| `MAX_UPLOAD_BYTES` | No | `10485760` | 10MB file size limit |
-| `LLM_MODEL` | No | `gemini-1.5-flash` | Gemini model name |
-| `LLM_BATCH_SIZE` | No | `20` | Max transactions per LLM call |
-| `LLM_RETRY_MAX` | No | `3` | LLM retry attempts |
-| `LLM_RETRY_BASE_DELAY` | No | `1.0` | Exponential backoff base (seconds) |
-| `ANOMALY_MULTIPLIER` | No | `3.0` | Statistical outlier threshold multiplier |
-| `DB_POOL_SIZE` | No | `10` | SQLAlchemy connection pool size |
+Two detection strategies run in a single pass over cleaned rows:
+
+**1. Statistical outlier**
+Per `account_id`, compute the median amount across all `SUCCESS` transactions. Flag any transaction where `amount > median × 3.0`. The multiplier is configurable via `ANOMALY_MULTIPLIER` env var.
+
+**2. Currency mismatch**
+Flag `USD` transactions at merchants in the domestic-only list (`Swiggy`, `Ola`, `IRCTC`, `Zomato`, `Jio`). Configurable via `DOMESTIC_ONLY_MERCHANTS`.
+
+Both conditions can fire simultaneously — reasons are concatenated with `;`.
 
 ---
 
-## Design Decisions
+## LLM Integration
 
-Full reasoning with tradeoffs in [docs/DESIGN_DECISIONS.md](docs/DESIGN_DECISIONS.md).
+**Model:** `gemini-1.5-flash` at `temperature=0.0` (deterministic)
 
-| Decision | Choice | Primary Reason |
+**Classification:** Uncategorised rows are batched in groups of 20 and sent to Gemini with a structured prompt. Responses are validated against a Pydantic schema — invalid categories fall back to `"Other"` rather than failing.
+
+**Narrative summary:** One call per job after all transactions are processed. Produces `risk_level` (`low`/`medium`/`high`) and a 2–3 sentence spending analysis.
+
+**Resilience:**
+- Exponential backoff: 3 retries with `delay = base_delay × 2ⁿ`
+- JSON fence stripping for models that ignore `responseMimeType`
+- `llm_failed=true` flag set on records if classification fails — job still completes
+- PII pseudonymisation: `account_id` is SHA-256 hashed before any LLM call
+
+**Redis-backed circuit breaker** (`app/utils/circuit_breaker.py`): opens after 5 consecutive failures, recovers after a configurable timeout. Returns `503` with fallback when open.
+
+---
+
+## Data Model
+
+```
+jobs
+├── id               UUID PK
+├── filename         string
+├── original_filename string
+├── file_hash        string(64)   SHA-256, indexed, used for dedup
+├── status           enum         pending|processing|completed|failed
+├── row_count_raw    int
+├── row_count_clean  int
+├── celery_task_id   string
+├── error_message    text
+└── created_at / updated_at / completed_at
+
+transactions
+├── id               UUID PK
+├── job_id           UUID FK → jobs.id (CASCADE DELETE)
+├── txn_id, date, merchant, amount, currency, status, category, account_id, notes
+├── is_anomaly       bool
+├── anomaly_reason   text
+├── llm_category     string       set only when Gemini overrides source category
+└── llm_failed       bool
+
+job_summaries
+├── id               UUID PK
+├── job_id           UUID FK → jobs.id (unique, CASCADE DELETE)
+├── total_spend_inr / total_spend_usd  float
+├── top_merchants    JSONB        queryable, indexed
+├── category_breakdown JSONB
+├── anomaly_count    int
+├── narrative        text
+├── risk_level       string
+└── llm_failed       bool
+```
+
+**Key design decisions:**
+- UUID PKs — distributed-safe, no enumeration attacks
+- `asyncpg` over `psycopg2` — native async driver, no thread-pool workarounds
+- `NullPool` in Celery workers — fork-safe, avoids shared file descriptor corruption
+- `JSONB` for `top_merchants` — queryable with `@>` and `?` operators, not raw TEXT
+- Server-side `func.now()` for timestamps — DB clock authority, not application clock
+- Composite indexes on `(job_id, is_anomaly)` and `(job_id, category)` for results queries
+
+---
+
+## Configuration Reference
+
+All settings are loaded from environment variables via `pydantic-settings`. Never import at module level in tasks — use `get_settings()` to allow test overrides.
+
+| Variable | Default | Description |
 |---|---|---|
-| API framework | FastAPI | Async-native; Pydantic v2 validation; auto OpenAPI docs |
-| Database | PostgreSQL | JSONB for summaries; ACID for job state transitions |
-| Job queue | Celery + Redis | Late ack; reject-on-worker-lost; beat scheduler |
-| LLM | Gemini 1.5 Flash | Free tier; `responseMimeType: "application/json"` |
-| ORM | SQLAlchemy async | Non-blocking; type-safe mapped columns |
-| Worker engine | NullPool | Fork-safe: no shared file descriptors across `fork()` |
-| File upload | Stream to disk | Never loads entire file into RAM; supports large CSVs |
-| Deduplication | SHA-256 hash | Prevents re-processing identical files; O(1) check |
+| `APP_ENV` | `development` | `development` \| `testing` \| `production` |
+| `DATABASE_URL` | required | `postgresql+asyncpg://user:pass@host/db` |
+| `REDIS_URL` | required | `redis://:password@host:6379/0` |
+| `GEMINI_API_KEY` | required | Gemini API key |
+| `LLM_MODEL` | `gemini-1.5-flash` | Model name |
+| `LLM_TEMPERATURE` | `0.0` | Set to 0 for deterministic outputs |
+| `LLM_BATCH_SIZE` | `20` | Transactions per Gemini call |
+| `LLM_RETRY_MAX` | `3` | Max retries on LLM failure |
+| `LLM_RETRY_BASE_DELAY` | `1.0` | Base delay (seconds); doubles each attempt |
+| `MAX_UPLOAD_BYTES` | `10485760` | 10 MB file size limit |
+| `ANOMALY_MULTIPLIER` | `3.0` | Statistical outlier threshold multiplier |
+| `CELERY_RESULT_EXPIRES` | `86400` | TTL (seconds) for Celery result tombstones |
+| `DB_POOL_SIZE` | `10` | SQLAlchemy connection pool size |
 
 ---
 
-## Scalability Analysis
+## Running Tests
 
-### Where the system breaks at 100x load
+```bash
+# Inside Docker (recommended — uses same DB/Redis)
+docker compose run --rm api pytest tests/ -v
 
-| Bottleneck | Current Limit | Failure Mode | Mitigation |
-|---|---|---|---|
-| PostgreSQL connections | ~100 (20 workers × pool_size=5) | `too many connections` | Add PgBouncer in front |
-| Redis memory | 256MB hard cap | OOM eviction of result tombstones | Increase limit; separate instance for results |
-| Gemini rate limits | Free tier: 15 req/min | `429 Too Many Requests` | Redis-based rate limiter; move to paid tier |
-| Upload disk | Single Docker volume | Full disk with concurrent large uploads | Replace with S3/MinIO; stream directly |
-| Worker concurrency | 4 per container | Task backlog accumulates | `docker compose scale worker=10` |
+# Locally (requires .env with test DATABASE_URL)
+pip install -e ".[dev]"
+pytest tests/ -v
+```
 
-### Enterprise re-architecture
+Coverage threshold: 70% (enforced via `--cov-fail-under=70`).
 
-1. **PgBouncer** — Pool 1,000 app connections → 100 DB connections; read replicas for all `GET` queries
-2. **S3 / MinIO** — Eliminate shared volume; workers read directly from object storage
-3. **Redis LLM cache** — Cache classification results keyed on `sha256(merchant)` for ~40% token cost reduction
-4. **Horizontal worker scaling** — Separate `llm` queue (slow) from `default` queue (fast); scale independently
-5. **Rate limiting** — Token bucket per API key in Redis; 429 with `Retry-After` header
+```bash
+# Lint
+ruff check app/
+
+# Type check
+mypy app/
+```
 
 ---
 
-## Development
+## Scaling Analysis
 
-### Run tests
-```bash
-# Local (requires .env with valid or test values)
-python -m pytest tests/ -v
+| Bottleneck | Current limit | Failure mode |
+|---|---|---|
+| PostgreSQL connections | ~100 | 20 workers × pool_size=5 saturates at scale |
+| Redis memory | 256 MB | Result tombstones accumulate without TTL |
+| Worker concurrency | 4 per container | LLM calls are I/O-bound — CPU slots wasted |
+| Upload disk | Single volume | Concurrent large uploads fill the shared volume |
 
-# In Docker — no local Python needed
-docker compose run --rm api pytest tests/ -v --cov=app/services
+**Enterprise path:**
 
-# Current: 51 tests, 90% service layer coverage
+- **DB:** PgBouncer in front of PostgreSQL (1000 app → 100 DB connections). Read replicas for all `GET /jobs/*` queries.
+- **Workers:** `docker compose scale worker=10` with `--concurrency=20`. Separate `default` (status checks) and `llm` (processing) queues for priority.
+- **Storage:** Replace `/tmp` volume with S3/MinIO — stream directly to Pandas without local disk.
+- **LLM cache:** Redis cache keyed on `sha256(merchant_name)` — identical merchants classify identically, reducing LLM calls by ~40%.
+- **API:** `slowapi` rate limiting per IP. CDN in front of GET endpoints.
+
+---
+
+## Project Structure
+
+```
+txn-pipeline/
+├── app/
+│   ├── api/
+│   │   ├── deps.py                # FastAPI dependency injection
+│   │   └── routers/jobs.py        # All /jobs/* endpoints
+│   ├── core/
+│   │   └── config.py              # pydantic-settings, all env vars
+│   ├── db/
+│   │   ├── session.py             # Async SQLAlchemy engine + NullPool worker engine
+│   │   └── repository.py          # All DB queries — zero SQL in routes
+│   ├── models/models.py           # SQLAlchemy ORM models
+│   ├── schemas/schemas.py         # Pydantic v2 request/response schemas
+│   ├── services/
+│   │   ├── cleaning.py            # CSV normalisation — pure functions
+│   │   ├── anomaly.py             # Statistical + currency mismatch detection
+│   │   └── llm.py                 # Gemini integration, retry, PII pseudonymisation
+│   ├── utils/circuit_breaker.py   # Redis-backed circuit breaker
+│   ├── workers/
+│   │   ├── celery_app.py          # Celery factory + queue routing
+│   │   └── tasks.py               # Thin orchestrators — business logic in services/
+│   └── main.py                    # FastAPI app factory, middleware, health probes
+├── alembic/versions/001_initial.py
+├── tests/unit/test_all.py
+├── Dockerfile
+├── docker-compose.yml
+├── pyproject.toml
+└── .env.example
 ```
 
-### Run linting
-```bash
-.venv/bin/python -m ruff check app/ tests/
-```
+---
 
-### Apply migrations manually
-```bash
-# In Docker
-docker compose run --rm migrate
+## Health & Observability
 
-# Locally (requires DATABASE_URL set)
-alembic upgrade head
-```
+| Endpoint | Purpose | Use case |
+|---|---|---|
+| `GET /health` | Liveness probe — returns 200 if process is alive | Kubernetes `livenessProbe` |
+| `GET /ready` | Readiness probe — verifies DB connectivity | Kubernetes `readinessProbe` |
 
-### Generate a new migration
-```bash
-alembic revision --autogenerate -m "add_index_on_merchant"
-```
+All requests receive an `X-Request-ID` header (generated if not supplied). Log correlation is built in.
 
-### View structured logs
-```bash
-# Pretty-print JSON logs with jq
-docker compose logs -f api | grep -v "^$" | jq '.'
+**Celery Beat cleanup task** runs every 2 hours to delete orphaned upload files from `/tmp/txn_uploads/` — prevents disk fill from failed jobs.
 
-# Filter by level
-docker compose logs -f worker | jq 'select(.level == "ERROR")'
+---
 
-# Filter by job_id
-docker compose logs -f worker | jq 'select(.job_id == "550e8400-...")'
-```
+## License
 
-### Project layout
-```
-app/
-  api/
-    routers/jobs.py       # All /jobs/* endpoints
-    deps.py               # FastAPI dependency injection
-  core/
-    config.py             # Pydantic settings (env vars)
-    logging_config.py     # Structured JSON logging setup
-  db/
-    session.py            # Engine factory (API pool + worker NullPool)
-    repository.py         # All SQL queries
-  models/models.py        # SQLAlchemy ORM models
-  schemas/schemas.py      # Pydantic request/response schemas
-  services/
-    cleaning.py           # Pure: CSV normalisation
-    anomaly.py            # Pure: anomaly detection rules
-    llm.py                # Gemini API calls with retry + Pydantic validation
-  workers/
-    celery_app.py         # Celery configuration
-    tasks.py              # Pipeline orchestration task
-  dashboard/health.py     # /dashboard/health endpoint
-  main.py                 # FastAPI app factory
-tests/
-  conftest.py             # Shared fixtures + env bootstrapping
-  unit/
-    test_all.py           # Core service tests (27 tests)
-    test_anomaly_extra.py # Extended anomaly rule tests (16 tests)
-    test_llm_extra.py     # Extended LLM service tests (8 tests)
-```
+MIT
