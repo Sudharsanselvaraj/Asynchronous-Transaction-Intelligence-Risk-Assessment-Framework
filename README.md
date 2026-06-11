@@ -15,7 +15,6 @@ Asynchronous Transaction Intelligence & Risk Assessment Framework
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/license/Sudharsanselvaraj/Asynchronous-Transaction-Intelligence-Risk-Assessment-Framework">
   <img src="https://img.shields.io/badge/Python-3.11+-blue">
   <img src="https://img.shields.io/badge/FastAPI-0.115+-green">
   <img src="https://img.shields.io/badge/PostgreSQL-16-blue">
