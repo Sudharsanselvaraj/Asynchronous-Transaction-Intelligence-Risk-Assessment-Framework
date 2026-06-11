@@ -13,6 +13,9 @@ from app.services.cleaning import CleanedRow
 
 DOMESTIC_ONLY_MERCHANTS = {"swiggy", "ola", "irctc", "zomato", "jio recharge", "jio"}
 
+# Threshold above which a FAILED transaction is itself suspicious (potential fraud retry)
+HIGH_VALUE_FAILED_THRESHOLD = 5_000.0
+
 
 @dataclass
 class AnomalyResult:
@@ -72,6 +75,18 @@ def detect_anomalies(rows: list[CleanedRow], multiplier: float = 3.0) -> list[An
         ):
             reasons.append(
                 f"USD transaction at domestic-only merchant '{row.merchant}'"
+            )
+
+        # ── High-value failed transaction ────────────────────────────
+        # A large FAILED transaction may indicate a fraud retry or a processor issue
+        if (
+            row.status == "FAILED"
+            and row.amount is not None
+            and row.amount > HIGH_VALUE_FAILED_THRESHOLD
+        ):
+            reasons.append(
+                f"High-value FAILED transaction: {row.amount:,.2f} {row.currency or ''} "
+                f"exceeds ₹{HIGH_VALUE_FAILED_THRESHOLD:,.0f} threshold"
             )
 
         # ── Notes-based hint (soft signal, not primary detector) ─────

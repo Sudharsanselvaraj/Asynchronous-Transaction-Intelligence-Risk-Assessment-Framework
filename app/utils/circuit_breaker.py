@@ -1,11 +1,12 @@
 """
 Redis-backed Circuit Breaker for handling service failures and preventing cascading errors.
 """
+import asyncio
 import time
-import json
-from typing import Optional, Callable, Any
-import aioredis
+from typing import Any, Callable, Optional
+
 from fastapi import HTTPException, status
+from redis.asyncio import from_url as redis_from_url
 
 
 class CircuitBreaker:
@@ -25,7 +26,7 @@ class CircuitBreaker:
     async def initialize(self):
         """Initialize Redis connection."""
         if self.redis is None:
-            self.redis = await aioredis.from_url(self.redis_url, decode_responses=True)
+            self.redis = await redis_from_url(self.redis_url, decode_responses=True)
 
     async def _get_key(self, service: str) -> str:
         return f"circuit_breaker:{service}"

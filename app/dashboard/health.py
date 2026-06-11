@@ -1,74 +1,59 @@
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncEngine
-from sqlalchemy import text
 from datetime import datetime
-import aioredis
-from celery import Celery
+
+from fastapi import APIRouter
+from redis.asyncio import from_url as redis_from_url
+from sqlalchemy import text
+
 from app.core.config import get_settings
 from app.db.session import engine
 
 router = APIRouter()
 
-async def get_redis_pool():
+
+@router.get("/dashboard/health", tags=["ops"])
+async def health_dashboard():
     settings = get_settings()
-    return await aioredis.from_url(settings.redis_url, decode_responses=True)
+    result: dict = {"timestamp": datetime.utcnow().isoformat()}
 
-def get_celery_app() -> Celery:
-    from app.workers.celery_app import celery_app
-    return celery_app
-
-@router.get('/dashboard/health')
-async def health_check(
-    redis=Depends(get_redis_pool),
-    celery=Depends(get_celery_app),
-    db_engine: AsyncEngine = Depends(lambda: engine),
-):
-    # Database connection pool stats
-    pool_stats = {'error': 'Pool stats not available'}
+    # Database
     try:
-        async with db_engine.connect() as conn:
-            result = await conn.exec_driver_sql('SELECT 1')
-            await result.fetchone()
-            pool_stats = {
-                'connections': 1,
-                'used': 0,
-                'size': 1,
-                'last_used': datetime.now().isoformat()
-            }
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        pool = engine.pool
+        result["database"] = {
+            "status": "ok",
+            "pool_size": settings.db_pool_size,
+            "checked_out": pool.checkedout() if hasattr(pool, "checkedout") else None,
+        }
     except Exception as e:
-        pool_stats = {'error': str(e)}
+        result["database"] = {"status": "error", "error": str(e)}
 
-    # Redis health
-    redis_status = {}
+    # Redis
     try:
+        redis = await redis_from_url(str(settings.redis_url), decode_responses=True)
         pong = await redis.ping()
-        redis_status = {
-            'status': 'ok' if pong else 'error',
-            'connected_clients': await redis.client().conn.get('client', {}).get('numconnections', 0)
+        info = await redis.info("clients")
+        await redis.aclose()
+        result["redis"] = {
+            "status": "ok" if pong else "error",
+            "connected_clients": info.get("connected_clients"),
         }
     except Exception as e:
-        redis_status = {
-            'status': 'error',
-            'error': str(e)
-        }
+        result["redis"] = {"status": "error", "error": str(e)}
 
-    # Celery health
-    celery_status = {}
+    # Celery — inspect is synchronous; do it in a thread to avoid blocking
     try:
-        stats = celery.control.inspect()
-        celery_status = {
-            'status': 'active',
-            'active_tasks': stats.active_tasks,
-            'queues': stats.queues
-        }
-    except Exception as e:
-        celery_status = {
-            'status': 'error',
-            'error': str(e)
-        }
+        import asyncio
+        from app.workers.celery_app import celery_app
 
-    return {
-        'database': pool_stats,
-        'redis': redis_status,
-        'celery': celery_status,
-    }
+        def _inspect():
+            inspector = celery_app.control.inspect(timeout=2)
+            active = inspector.active() or {}
+            return {"status": "ok", "active_tasks": sum(len(v) for v in active.values())}
+
+        celery_info = await asyncio.get_event_loop().run_in_executor(None, _inspect)
+        result["celery"] = celery_info
+    except Exception as e:
+        result["celery"] = {"status": "error", "error": str(e)}
+
+    return result

@@ -69,7 +69,10 @@ def _parse_date(raw: str) -> str | None:
 
 def _parse_amount(raw: str) -> float | None:
     """Strip currency symbols, commas, spaces; return float or None."""
-    cleaned = re.sub(r"[^\d.]", "", raw.strip())
+    stripped = raw.strip()
+    if stripped.startswith("-"):
+        return None
+    cleaned = re.sub(r"[^\d.]", "", stripped)
     try:
         val = float(cleaned)
         return val if val > 0 else None
