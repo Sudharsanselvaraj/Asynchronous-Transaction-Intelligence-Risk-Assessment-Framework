@@ -123,6 +123,7 @@ services:
     restart: unless-stopped
     networks:
       - internal
+      - external
 
   # ── Celery Beat (scheduled tasks) ────────────────────────────────────────────
   beat:

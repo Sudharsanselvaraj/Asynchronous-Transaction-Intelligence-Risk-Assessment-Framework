@@ -59,6 +59,8 @@ def create_celery_app() -> Celery:
         beat_schedule_filename="/tmp/celerybeat-schedule",
     )
 
+    app.autodiscover_tasks(["app.workers"])
+
     return app
 
 

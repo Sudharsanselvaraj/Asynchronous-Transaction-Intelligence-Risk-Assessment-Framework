@@ -16,6 +16,7 @@ RUN pip install --no-cache-dir --prefix=/install \
     "uvicorn[standard]>=0.32" \
     "sqlalchemy[asyncio]>=2.0" \
     "asyncpg>=0.30" \
+    "psycopg2-binary>=2.9" \
     "celery[redis]>=5.4" \
     "redis>=5.1" \
     "httpx>=0.27" \

@@ -195,6 +195,9 @@ async def classify_uncategorised(
             for i, _ in batch:
                 results[i] = LLMClassificationResult(index=i, category=None, failed=True)
 
+        # Respect free-tier rate limit (15 RPM = 1 req per 4s)
+        await asyncio.sleep(10)
+
     return results
 
 

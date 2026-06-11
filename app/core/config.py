@@ -47,7 +47,7 @@ class Settings(BaseSettings):
 
     # ── LLM ──────────────────────────────────────────────────────
     gemini_api_key: str = Field(..., description="Gemini API key — never hardcode")
-    llm_model: str = "gemini-1.5-flash"
+    llm_model: str = "gemini-2.5-flash"
     llm_temperature: float = 0.0   # deterministic outputs
     llm_max_tokens: int = 2048
     llm_batch_size: int = 20       # max transactions per LLM call
