@@ -37,7 +37,7 @@ Upload → SHA-256 dedup → Job record (pending) → Celery enqueue
          ↓
     [Worker: llm queue]
     ├── 1. clean_csv()               Normalise dates, strip currency symbols, dedup rows
-    ├── 2. detect_anomalies()        Statistical outlier (3× median) + currency mismatch
+    ├── 2. detect_anomalies()        4 rules: statistical outlier, currency mismatch, high-value failed, suspicious notes
     ├── 3. classify_uncategorised()  Batched Gemini calls, Pydantic-validated responses
     ├── 4. generate_narrative()      Single LLM call → risk level + spend narrative
     └── 5. bulk_insert()             Single DB commit for all transactions + summary
@@ -239,15 +239,19 @@ Expected columns (case-insensitive, extra columns are ignored):
 
 ## Anomaly Detection
 
-Two detection strategies run in a single pass over cleaned rows:
+Four detection rules run in a single pass over cleaned rows. Multiple rules can fire on the same row — all matching reasons are concatenated with `;`.
 
 **1. Statistical outlier**
-Per `account_id`, compute the median amount across all `SUCCESS` transactions. Flag any transaction where `amount > median × 3.0`. The multiplier is configurable via `ANOMALY_MULTIPLIER` env var.
+Per `account_id`, compute the median amount across all `SUCCESS` transactions. Flag any transaction where `amount > median × 3.0`. Multiplier configurable via `ANOMALY_MULTIPLIER`.
 
 **2. Currency mismatch**
-Flag `USD` transactions at merchants in the domestic-only list (`Swiggy`, `Ola`, `IRCTC`, `Zomato`, `Jio`). Configurable via `DOMESTIC_ONLY_MERCHANTS`.
+Flag `USD` transactions at domestic-only merchants (`Swiggy`, `Ola`, `IRCTC`, `Zomato`, `Jio`). Configurable via `DOMESTIC_ONLY_MERCHANTS`.
 
-Both conditions can fire simultaneously — reasons are concatenated with `;`.
+**3. High-value failed transaction**
+Flag any `FAILED` transaction where `amount > ₹5,000`. A large failed charge may indicate a fraud retry or payment processor issue that warrants review.
+
+**4. Source annotation**
+Flag rows where the `notes` field contains `"suspicious"` (case-insensitive) — a soft signal from the source system.
 
 ---
 
@@ -343,12 +347,18 @@ All settings are loaded from environment variables via `pydantic-settings`. Neve
 # Inside Docker (recommended — uses same DB/Redis)
 docker compose run --rm api pytest tests/ -v
 
-# Locally (requires .env with test DATABASE_URL)
+# Locally (requires .env or test env vars set — see tests/conftest.py)
 pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
-Coverage threshold: 70% (enforced via `--cov-fail-under=70`).
+**51 tests across 3 files — 90% coverage on `app/services/`** (enforced via `--cov-fail-under=70`).
+
+| File | Tests | What it covers |
+|---|---|---|
+| `tests/unit/test_all.py` | 27 | Core cleaning, anomaly, and LLM classification |
+| `tests/unit/test_anomaly_extra.py` | 16 | Edge cases: null amounts, boundary values, multi-rule combinations |
+| `tests/unit/test_llm_extra.py` | 8 | Narrative summary, risk coercion, markdown fence stripping |
 
 ```bash
 # Lint
@@ -388,23 +398,34 @@ txn-pipeline/
 │   │   ├── deps.py                # FastAPI dependency injection
 │   │   └── routers/jobs.py        # All /jobs/* endpoints
 │   ├── core/
-│   │   └── config.py              # pydantic-settings, all env vars
+│   │   ├── config.py              # pydantic-settings, all env vars
+│   │   └── logging_config.py      # Structured JSON logging setup
+│   ├── dashboard/health.py        # GET /dashboard/health (DB, Redis, Celery)
 │   ├── db/
-│   │   ├── session.py             # Async SQLAlchemy engine + NullPool worker engine
+│   │   ├── session.py             # Async engine (pool) + NullPool worker engine
 │   │   └── repository.py          # All DB queries — zero SQL in routes
 │   ├── models/models.py           # SQLAlchemy ORM models
 │   ├── schemas/schemas.py         # Pydantic v2 request/response schemas
 │   ├── services/
 │   │   ├── cleaning.py            # CSV normalisation — pure functions
-│   │   ├── anomaly.py             # Statistical + currency mismatch detection
+│   │   ├── anomaly.py             # 4 detection rules — pure functions
 │   │   └── llm.py                 # Gemini integration, retry, PII pseudonymisation
 │   ├── utils/circuit_breaker.py   # Redis-backed circuit breaker
 │   ├── workers/
 │   │   ├── celery_app.py          # Celery factory + queue routing
 │   │   └── tasks.py               # Thin orchestrators — business logic in services/
 │   └── main.py                    # FastAPI app factory, middleware, health probes
+├── docs/
+│   ├── ARCHITECTURE.md            # 6 Mermaid diagrams (system, sequence, ER, etc.)
+│   └── DESIGN_DECISIONS.md        # 10 architectural decisions with tradeoffs
 ├── alembic/versions/001_initial.py
-├── tests/unit/test_all.py
+├── tests/
+│   ├── conftest.py                # Env bootstrapping + shared fixtures
+│   └── unit/
+│       ├── test_all.py            # 27 core service tests
+│       ├── test_anomaly_extra.py  # 16 edge case tests
+│       └── test_llm_extra.py      # 8 LLM service tests
+├── transactions.csv               # Provided dataset (included for reviewer convenience)
 ├── Dockerfile
 ├── docker-compose.yml
 ├── pyproject.toml
@@ -419,10 +440,18 @@ txn-pipeline/
 |---|---|---|
 | `GET /health` | Liveness probe — returns 200 if process is alive | Kubernetes `livenessProbe` |
 | `GET /ready` | Readiness probe — verifies DB connectivity | Kubernetes `readinessProbe` |
+| `GET /dashboard/health` | Detailed status: DB pool, Redis, active Celery tasks | Internal monitoring |
 
-All requests receive an `X-Request-ID` header (generated if not supplied). Log correlation is built in.
+**Structured JSON logging** — every log line is a single JSON object emitted to stdout, compatible with Datadog, CloudWatch Logs, and Grafana Loki. Request logs include method, path, HTTP status, and latency in milliseconds.
 
-**Celery Beat cleanup task** runs every 2 hours to delete orphaned upload files from `/tmp/txn_uploads/` — prevents disk fill from failed jobs.
+```json
+{"ts":"2024-09-04T10:01:23Z","level":"INFO","logger":"app.main","msg":"http",
+ "request_id":"abc-123","method":"POST","path":"/jobs/upload","status":201,"ms":87.4}
+```
+
+All requests receive an `X-Request-ID` header (generated if not supplied) — the same ID appears in every log line for that request, enabling end-to-end trace correlation across API and worker logs.
+
+**Celery Beat cleanup task** runs every hour to delete orphaned upload files from `/tmp/txn_uploads/` — prevents disk fill from failed or stalled jobs.
 
 ---
 
